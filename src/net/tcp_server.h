@@ -46,7 +46,7 @@ private:
     void session_loop(int fd);
 
     ServerConfig cfg_;
-    int listen_fd_{-1};
+    std::atomic<int> listen_fd_{-1};
     std::atomic<std::uint16_t> bound_port_{0};
     std::atomic<bool> running_{false};
     std::thread acceptor_;

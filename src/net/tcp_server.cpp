@@ -62,28 +62,30 @@ TcpServer::~TcpServer() {
 }
 
 bool TcpServer::start() {
-    listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd_ < 0) return false;
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
     int one = 1;
-    ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(cfg_.port);
     inet_pton(AF_INET, cfg_.host.c_str(), &addr.sin_addr);
-    if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         obs::log_warn("tcp", std::string("bind failed: ") + std::strerror(errno));
-        ::close(listen_fd_);
-        listen_fd_ = -1;
+        ::close(fd);
         return false;
     }
     socklen_t len = sizeof(addr);
-    ::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&addr), &len);
+    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
     bound_port_.store(ntohs(addr.sin_port));
-    if (::listen(listen_fd_, 32) < 0) {
-        ::close(listen_fd_);
-        listen_fd_ = -1;
+    if (::listen(fd, 32) < 0) {
+        ::close(fd);
         return false;
     }
+    // Publish listen_fd_ before the acceptor thread starts. The atomic
+    // store happens-before the thread create call, which the thread sees
+    // when it loads listen_fd_ on its first iteration.
+    listen_fd_.store(fd);
     running_.store(true);
     acceptor_ = std::thread(&TcpServer::accept_loop, this);
     return true;
@@ -91,10 +93,10 @@ bool TcpServer::start() {
 
 void TcpServer::stop() {
     if (!running_.exchange(false)) return;
-    if (listen_fd_ >= 0) {
-        ::shutdown(listen_fd_, SHUT_RDWR);
-        ::close(listen_fd_);
-        listen_fd_ = -1;
+    int fd = listen_fd_.exchange(-1);
+    if (fd >= 0) {
+        ::shutdown(fd, SHUT_RDWR);
+        ::close(fd);
     }
     if (acceptor_.joinable()) acceptor_.join();
     std::lock_guard<std::mutex> g(sessions_mu_);
@@ -105,17 +107,19 @@ void TcpServer::stop() {
 
 void TcpServer::accept_loop() {
     while (running_.load()) {
+        int fd = listen_fd_.load();
+        if (fd < 0) return;
         sockaddr_in peer{};
         socklen_t plen = sizeof(peer);
-        int fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&peer), &plen);
-        if (fd < 0) {
+        int cli = ::accept(fd, reinterpret_cast<sockaddr*>(&peer), &plen);
+        if (cli < 0) {
             if (!running_.load()) return;
             continue;
         }
         int one = 1;
-        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        ::setsockopt(cli, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         std::lock_guard<std::mutex> g(sessions_mu_);
-        session_threads_.emplace_back([this, fd] { session_loop(fd); });
+        session_threads_.emplace_back([this, cli] { session_loop(cli); });
     }
 }
 
