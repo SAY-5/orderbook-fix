@@ -73,6 +73,9 @@ set_tests_properties(concurrent_sessions_stress_test PROPERTIES TIMEOUT 240)
 add_executable(replay_bench bench/replay_bench.cpp)
 target_link_libraries(replay_bench PRIVATE obfix_core)
 
+add_executable(cacheline_study bench/cacheline_study.cpp)
+target_link_libraries(cacheline_study PRIVATE obfix_core)
+
 # Fuzzers (clang only, opt-in)
 if(OBFIX_FUZZ)
   add_executable(fix_parser_fuzz tests/fuzz/fix_parser_fuzz.cpp)

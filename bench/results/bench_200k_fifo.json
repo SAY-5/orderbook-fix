@@ -1,0 +1,12 @@
+{
+  "n_messages": 200000,
+  "algo": "fifo",
+  "wall_seconds": 33.597906,
+  "msgs_per_sec": 5952.75,
+  "avg_ns": 150365,
+  "p50_ns": 131072,
+  "p95_ns": 262144,
+  "p99_ns": 1048576,
+  "p999_ns": 8388608,
+  "smoke": false
+}

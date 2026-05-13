@@ -1,0 +1,12 @@
+{
+  "n_iters": 100000,
+  "resting_per_level": 32,
+  "baseline_mean_ns": 668.34,
+  "baseline_p50_ns": 64,
+  "baseline_p99_ns": 128,
+  "aligned_mean_ns": 556.17,
+  "aligned_p50_ns": 64,
+  "aligned_p99_ns": 128,
+  "delta_mean_pct": -16.78,
+  "delta_p99_pct": 0.00
+}

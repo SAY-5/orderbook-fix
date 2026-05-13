@@ -86,6 +86,48 @@ as soon as the aggressor is filled. The latency histogram is logarithmic
 (factor-2 buckets); the P99 numbers reflect the deepening book over the
 run, not jitter. Raw outputs live in `bench/results/`.
 
+FIFO at 200k messages on the same hardware:
+
+```json
+{
+  "n_messages": 200000,
+  "algo": "fifo",
+  "wall_seconds": 33.597906,
+  "msgs_per_sec": 5952.75,
+  "p50_ns": 131072,
+  "p95_ns": 262144,
+  "p99_ns": 1048576,
+  "p999_ns": 8388608
+}
+```
+
+### Why the bench tops out below 1M
+
+The harness is request/response: send one `NewOrderSingle`, block until
+the first `ExecutionReport` is parsed, repeat. With one session and one
+matcher thread (`book_mu_` is a coarse mutex per the README architecture
+section), wall throughput is bounded by the round-trip per message:
+session decode + matcher lock + serialization + socket write + client
+parse. On the dev box that ceiling is around 6k msgs/sec for FIFO and
+~1.3k for pro-rata. A 1M FIFO run takes ~170 s wall and a 1M pro-rata
+run takes ~13 min; neither is useful as a CI smoke. A client-pipelined
+mode was prototyped (sender + drain thread on the same fd) but the
+single-threaded `Session::on_bytes` plus `book_mu_` on the server side
+remain the bottleneck, so the wall time does not improve. The honest
+takeaway: scale beyond 200k requires sharding sessions across matcher
+threads, which is out of scope for this repo. The 200k FIFO number is
+the largest end-to-end bench that fits in a CI smoke step.
+
+The cache-line padding study (`bench/cacheline_study.cpp`) measures the
+hot match path with and without `alignas(64)` on `Order` and
+`PriceLevel`. Result on M2 Pro: alignment is neutral-to-slightly-worse,
+because the matcher serializes through one mutex and the working set
+fits in L1 already. Numbers in `bench/results/cacheline_study.json`.
+
+A regression gate (`make bench-regress`) runs a 10k FIFO smoke and
+fails CI if `msgs_per_sec` drops more than 30% below the committed
+baseline at `bench/results/bench_smoke_baseline.json`.
+
 To reproduce: `make bench` (CMake + Release build, no extra deps).
 
 ## Architecture

@@ -90,13 +90,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install
-        run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build python3
       - name: configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: build
-        run: cmake --build build --target replay_bench
-      - name: smoke
-        run: ./build/replay_bench --smoke
+        run: cmake --build build --target replay_bench cacheline_study
+      - name: smoke 10k
+        run: ./build/replay_bench --n 10000 --algo fifo --out /tmp/bench_smoke_current.json
+      - name: bench regress gate
+        run: |
+          python3 bench/regress.py \
+            --baseline bench/results/bench_smoke_baseline.json \
+            --current /tmp/bench_smoke_current.json \
+            --threshold 0.30
+      - name: cacheline study
+        run: ./build/cacheline_study --n 50000 --resting 32
 
   docker:
     runs-on: ubuntu-latest
