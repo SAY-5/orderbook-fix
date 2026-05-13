@@ -165,17 +165,23 @@ TEST(FixSession, OutSeqIncrementsOnEverySend) {
     EXPECT_EQ(std::stoull(pb.msg.get(34).value_or("0")), 2u);
 }
 
-TEST(FixSession, ResendRequestRepliesWithLogoutSinceWeDoNotRetainHistory) {
+TEST(FixSession, ResendRequestReplaysFromOutboundHistoryWithPossDup) {
+    // v3: the session retains an outbound history ring. ResendRequest
+    // BeginSeqNo=1 EndSeqNo=0 replays everything from seq 1 to current,
+    // marking each replay PossDupFlag=Y with the original SendingTime in
+    // OrigSendingTime (122).
     Session s = make_session();
     s.on_bytes(wire({{35, "A"}, {49, "C"}, {56, "OBFIX"}, {34, "1"}, {108, "30"}}));
     auto step =
         s.on_bytes(wire({{35, "2"}, {49, "C"}, {56, "OBFIX"}, {34, "2"}, {7, "1"}, {16, "0"}}));
-    EXPECT_TRUE(step.disconnect);
-    ASSERT_EQ(step.out.size(), 1u);
+    EXPECT_FALSE(step.disconnect);
+    ASSERT_EQ(step.out.size(), 1u);  // one Logon echo retained = one replay
     Parser p(kSohText);
     auto pr = p.parse_one(step.out[0].bytes);
     ASSERT_EQ(pr.err, ParseError::None);
-    EXPECT_EQ(pr.msg.msg_type(), "5");
+    EXPECT_EQ(pr.msg.msg_type(), "A");  // replayed Logon
+    EXPECT_EQ(pr.msg.get(tag::PossDupFlag).value_or(""), "Y");
+    EXPECT_FALSE(pr.msg.get(tag::OrigSendingTime).value_or("").empty());
 }
 
 TEST(FixSession, MultipleMessagesInOneRecv) {

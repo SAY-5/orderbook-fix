@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <string>
 #include <vector>
@@ -29,6 +30,11 @@ struct SessionConfig {
     // sessions persist across reconnects; this engine is cold-start only
     // so the default is true.
     bool reset_on_logon{true};
+    // Cap on the outbound history ring used to fulfil ResendRequest. The
+    // session keeps the last `outbound_history_size` admin + app messages
+    // it sent; older ones are answered with GapFill (35=4). 0 disables
+    // history retention entirely.
+    std::size_t outbound_history_size{10000};
 };
 
 // Outbound action a session wants the transport to perform. The session
@@ -87,11 +93,30 @@ public:
     }
     void set_now_provider(std::function<std::string()> f) { now_ = std::move(f); }
 
+    // Diagnostic accessor: count of outbound messages currently retained
+    // in the resend history ring. Test-only.
+    std::size_t history_size() const noexcept { return history_.size(); }
+
 private:
     SessionStep handle_message(Message m);
     WireOut build_message(const std::vector<std::pair<int, std::string>>& body);
     WireOut build_resend_request(SeqNum from);
     WireOut build_reject(SeqNum ref, std::string_view reason);
+    // Replay handler: walks `history_` for [begin, end] (end=0 means
+    // "to current out_seq"), emitting either PossDupFlag=Y replays or
+    // SequenceReset-GapFill (35=4 + GapFillFlag=Y + NewSeqNo=...) for
+    // gaps that fell out of the ring.
+    void handle_resend_request(SeqNum begin, SeqNum end, std::vector<WireOut>& out);
+    void retain_outbound(SeqNum seq, const std::string& sending_time, const std::string& bytes);
+
+    // One slot of outbound history. We retain just enough to rebuild a
+    // PossDupFlag=Y replay; the original SendingTime goes into
+    // OrigSendingTime (122) and the rest is the original wire bytes.
+    struct OutboundRecord {
+        SeqNum seq;
+        std::string sending_time;
+        std::string bytes;  // original on-the-wire bytes
+    };
 
     std::string default_now() const;
 
@@ -103,6 +128,7 @@ private:
     SeqNum out_seq_{0};
     std::string in_buf_;
     std::function<std::string()> now_;
+    std::deque<OutboundRecord> history_;
 };
 
 }  // namespace obfix::fix

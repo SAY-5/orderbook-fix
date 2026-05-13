@@ -75,14 +75,41 @@ allocator can run unaware of the index.
 See `docs/pro-rata-matching.md` for the worked examples and the rationale
 for the FIFO-residual tiebreaker.
 
-## Sequence number recovery (out of scope)
+## Sequence number recovery
 
-The session sends ResendRequest on gap detection per spec, but replies to
-incoming ResendRequest with Logout because this engine does not retain
-message history. Production fronting typically pairs the engine with a
-recovery tap (FIXT.1.1 store, SBE replay, or a database-backed
-EventStore) that can replay by sequence. That tap is not part of this
-repo.
+Gap detection (inbound seq > expected) emits a ResendRequest on the
+outbound side.
+
+Inbound ResendRequest is fulfilled from a bounded outbound history ring.
+Each message the session sends with a session-assigned MsgSeqNum is
+retained as `(seq, original_sending_time, wire_bytes)` until the ring's
+configured cap (`SessionConfig::outbound_history_size`, default 10000) is
+exceeded, at which point the oldest entry is dropped.
+
+When a ResendRequest arrives for `[BeginSeqNo, EndSeqNo]` (with EndSeqNo
+= 0 meaning "to current end"):
+
+* Seqs that fell out of the ring are coalesced into a single
+  SequenceReset-GapFill (35=4, GapFillFlag=Y, NewSeqNo=oldest-retained).
+  The GapFill carries the seq of `BeginSeqNo` so the peer applies it as
+  filling the gap.
+* Retained seqs are replayed by re-parsing the stored bytes, splicing in
+  `PossDupFlag=Y` (43) and `OrigSendingTime=<original SendingTime>` (122),
+  and re-serializing. The retained `SendingTime` is overwritten with
+  "now" per FIX 4.4 rules.
+* Seqs the peer asked for that are outside the session's known range are
+  ignored (no NACK; this matches what most accepting venues do).
+
+`SessionConfig::outbound_history_size = 0` disables retention; in that
+mode every resend collapses to a single GapFill bumping the peer past
+the unknown range. That config is useful for memory-pinned deployments
+where the venue is expected to handle recovery itself.
+
+The PossDupFlag *inbound* path (the peer's own replays) is still out of
+scope: the session does not parse `PossDupFlag=Y` to suppress
+double-processing of app messages. Adding that is straightforward but
+requires per-message dedup at the matcher layer, which is left as future
+work.
 
 ## Concurrency model
 

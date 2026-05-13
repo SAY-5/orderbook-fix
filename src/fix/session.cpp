@@ -53,17 +53,116 @@ WireOut Session::build_message(const std::vector<std::pair<int, std::string>>& b
     if (msg_type_pos >= 0) b.push_back(body[msg_type_pos]);
     if (!seen_sender) b.emplace_back(tag::SenderCompID, cfg_.sender_comp_id);
     if (!seen_target) b.emplace_back(tag::TargetCompID, cfg_.target_comp_id);
+    SeqNum assigned_seq = 0;
     if (!seen_seq) {
         ++out_seq_;
+        assigned_seq = out_seq_;
         b.emplace_back(tag::MsgSeqNum, std::to_string(out_seq_));
     }
-    if (!seen_time) b.emplace_back(tag::SendingTime, default_now());
+    std::string sending_time;
+    if (!seen_time) {
+        sending_time = default_now();
+        b.emplace_back(tag::SendingTime, sending_time);
+    }
     // Body fields after the standard header.
     for (std::size_t i = 0; i < body.size(); ++i) {
         if (static_cast<int>(i) == msg_type_pos) continue;
         b.push_back(body[i]);
     }
-    return WireOut{serializer_.build(b)};
+    std::string bytes = serializer_.build(b);
+    // Retain in outbound history so a future ResendRequest can replay it.
+    // We only retain messages we own the seq for (assigned_seq != 0); the
+    // caller is responsible for messages where they preset MsgSeqNum.
+    if (assigned_seq != 0 && cfg_.outbound_history_size > 0) {
+        // Recover the SendingTime from `b` if the caller passed it instead
+        // of letting build_message assign now.
+        std::string st = sending_time;
+        if (st.empty()) {
+            for (const auto& kv : b)
+                if (kv.first == tag::SendingTime) {
+                    st = kv.second;
+                    break;
+                }
+        }
+        retain_outbound(assigned_seq, st, bytes);
+    }
+    return WireOut{std::move(bytes)};
+}
+
+void Session::retain_outbound(SeqNum seq, const std::string& sending_time,
+                              const std::string& bytes) {
+    history_.push_back(OutboundRecord{seq, sending_time, bytes});
+    while (history_.size() > cfg_.outbound_history_size) history_.pop_front();
+}
+
+void Session::handle_resend_request(SeqNum begin, SeqNum end, std::vector<WireOut>& out) {
+    // Normalize the range. EndSeqNo=0 means "to current end of stream".
+    if (end == 0) end = out_seq_;
+    if (begin == 0 || begin > end || begin > out_seq_) return;
+
+    // Find the oldest seq we still have in history_.
+    SeqNum oldest_retained = history_.empty() ? out_seq_ + 1 : history_.front().seq;
+
+    // For seqs that fell out of the ring, emit a SequenceReset-GapFill
+    // (35=4, 123=Y, 36=<next-seq-to-restart-at>). We coalesce the entire
+    // gap range into one GapFill message rather than emitting one per
+    // missing seq; that is what FIX 4.4 prescribes for older retransmits.
+    SeqNum cursor = begin;
+    if (cursor < oldest_retained) {
+        SeqNum new_seq_no = std::min(oldest_retained, end + 1);
+        // The GapFill message itself carries the seq of `cursor` so the
+        // peer accepts it as filling the gap from `cursor` to
+        // new_seq_no - 1. We hand-build the wire bytes here so the
+        // out_seq_ counter is not incremented by build_message (we are
+        // replaying, not sending forward).
+        std::vector<std::pair<int, std::string>> body{
+            {tag::MsgType, msgtype::SequenceReset},
+            {tag::SenderCompID, cfg_.sender_comp_id},
+            {tag::TargetCompID, cfg_.target_comp_id},
+            {tag::MsgSeqNum, std::to_string(cursor)},
+            {tag::SendingTime, default_now()},
+            {tag::GapFillFlag, "Y"},
+            {tag::PossDupFlag, "Y"},
+            {tag::NewSeqNo, std::to_string(new_seq_no)},
+        };
+        out.push_back(WireOut{serializer_.build(body)});
+        cursor = new_seq_no;
+    }
+    if (cursor > end) return;
+
+    // Walk the retained ring and replay each requested seq with
+    // PossDupFlag=Y and OrigSendingTime=<original SendingTime>.
+    for (const auto& rec : history_) {
+        if (rec.seq < cursor) continue;
+        if (rec.seq > end) break;
+        // Re-parse the original bytes so we can re-serialize with the
+        // PossDupFlag and OrigSendingTime tags spliced in. The parser is
+        // tolerant of our own well-formed output, so this round-trips.
+        ParseResult pr = parser_.parse_one(rec.bytes);
+        if (pr.err != ParseError::None) continue;
+        std::vector<std::pair<int, std::string>> body;
+        body.reserve(pr.msg.fields.size() + 2);
+        // MsgType first.
+        auto mt_it = pr.msg.fields.find(tag::MsgType);
+        if (mt_it != pr.msg.fields.end()) body.emplace_back(tag::MsgType, mt_it->second);
+        // Copy header/body in a stable order, skipping fields the
+        // serializer will re-emit (8/9/10) and the ones we are overriding.
+        for (const auto& kv : pr.msg.fields) {
+            int t = kv.first;
+            if (t == tag::BeginString || t == tag::BodyLength || t == tag::CheckSum ||
+                t == tag::MsgType || t == tag::PossDupFlag || t == tag::OrigSendingTime ||
+                t == tag::SendingTime)
+                continue;
+            body.emplace_back(t, kv.second);
+        }
+        // FIX requires OrigSendingTime to equal the original SendingTime
+        // when PossDupFlag=Y. Inject SendingTime "now" and OrigSendingTime
+        // = retained.
+        body.emplace_back(tag::SendingTime, default_now());
+        body.emplace_back(tag::OrigSendingTime, rec.sending_time);
+        body.emplace_back(tag::PossDupFlag, "Y");
+        out.push_back(WireOut{serializer_.build(body)});
+    }
 }
 
 WireOut Session::initiate_logon() {
@@ -181,10 +280,15 @@ SessionStep Session::handle_message(Message m) {
         return step;
     }
     if (mt == msgtype::ResendRequest) {
-        // We do not retain history; reply with GapFill. This engine is
-        // cold-start only (see README "What this is not").
-        step.out.push_back(send_logout("resend not supported"));
-        step.disconnect = true;
+        // FIX 4.4: BeginSeqNo = first seq the peer wants; EndSeqNo = last,
+        // or 0 to mean "to current end". Messages still in `history_` are
+        // replayed with PossDupFlag=Y; messages that fell out of the ring
+        // are answered with SequenceReset-GapFill (35=4, 123=Y, 36=next).
+        SeqNum begin = 0;
+        SeqNum end = 0;
+        if (auto b = m.get(tag::BeginSeqNo)) begin = static_cast<SeqNum>(std::stoull(*b));
+        if (auto e = m.get(tag::EndSeqNo)) end = static_cast<SeqNum>(std::stoull(*e));
+        handle_resend_request(begin, end, step.out);
         return step;
     }
     if (mt == msgtype::Logout) {

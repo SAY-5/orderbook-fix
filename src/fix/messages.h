@@ -28,6 +28,10 @@ constexpr int RefSeqNum = 45;
 constexpr int Text = 58;
 constexpr int BeginSeqNo = 7;
 constexpr int EndSeqNo = 16;
+constexpr int PossDupFlag = 43;
+constexpr int OrigSendingTime = 122;
+constexpr int NewSeqNo = 36;
+constexpr int GapFillFlag = 123;
 
 // Order entry tags
 constexpr int ClOrdID = 11;

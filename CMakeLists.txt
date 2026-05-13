@@ -53,7 +53,7 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 
 # Unit tests: one executable per file keeps failures isolated.
-foreach(t fix_parser_test fix_session_test fix_session_decision_table_test pro_rata_test matcher_test order_book_test price_level_test property_test)
+foreach(t fix_parser_test fix_session_test fix_session_decision_table_test fix_session_resend_test pro_rata_test matcher_test order_book_test price_level_test property_test)
   add_executable(${t} tests/unit/${t}.cpp)
   target_link_libraries(${t} PRIVATE obfix_core gtest gtest_main)
   add_test(NAME ${t} COMMAND ${t})
