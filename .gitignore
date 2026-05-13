@@ -1,0 +1,13 @@
+build/
+build-*/
+*.bin
+*.o
+*.a
+*.dSYM/
+.cache/
+compile_commands.json
+crash-*
+fuzz-corpus/
+profile.*
+*.gcda
+*.gcno
