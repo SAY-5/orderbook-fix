@@ -53,16 +53,21 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 
 # Unit tests: one executable per file keeps failures isolated.
-foreach(t fix_parser_test fix_session_test pro_rata_test matcher_test order_book_test price_level_test)
+foreach(t fix_parser_test fix_session_test fix_session_decision_table_test pro_rata_test matcher_test order_book_test price_level_test property_test)
   add_executable(${t} tests/unit/${t}.cpp)
   target_link_libraries(${t} PRIVATE obfix_core gtest gtest_main)
   add_test(NAME ${t} COMMAND ${t})
 endforeach()
 
-# Integration test
+# Integration tests
 add_executable(session_e2e_test tests/integration/session_e2e_test.cpp)
 target_link_libraries(session_e2e_test PRIVATE obfix_core gtest gtest_main)
 add_test(NAME session_e2e_test COMMAND session_e2e_test)
+
+add_executable(concurrent_sessions_stress_test tests/integration/concurrent_sessions_stress_test.cpp)
+target_link_libraries(concurrent_sessions_stress_test PRIVATE obfix_core gtest gtest_main)
+add_test(NAME concurrent_sessions_stress_test COMMAND concurrent_sessions_stress_test)
+set_tests_properties(concurrent_sessions_stress_test PROPERTIES TIMEOUT 240)
 
 # Bench
 add_executable(replay_bench bench/replay_bench.cpp)
