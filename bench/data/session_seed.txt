@@ -1,0 +1,19 @@
+# Bench session seed. Each line is a NewOrderSingle (D) field set used by
+# `replay_bench`. The harness builds these as FIX messages on the fly
+# (with FIX SOH 0x01 and a computed checksum) rather than reading bytes
+# off disk; that keeps the seed format readable and avoids checking in
+# binary blobs. Re-seed by editing this file and updating the loop in
+# replay_bench.cpp.
+#
+# Format: side,price,qty
+# side: B (buy) or S (sell)
+B,9995,100
+S,10005,100
+B,9996,100
+S,10004,100
+B,10000,200
+S,10000,200
+B,9999,100
+S,10001,100
+B,10000,150
+S,10000,150

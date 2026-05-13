@@ -1,0 +1,12 @@
+{
+  "n_messages": 100000,
+  "algo": "prorata",
+  "wall_seconds": 73.356419,
+  "msgs_per_sec": 1363.21,
+  "avg_ns": 692242,
+  "p50_ns": 1048576,
+  "p95_ns": 2097152,
+  "p99_ns": 4194304,
+  "p999_ns": 8388608,
+  "smoke": false
+}
