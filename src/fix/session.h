@@ -93,6 +93,24 @@ public:
     }
     void set_now_provider(std::function<std::string()> f) { now_ = std::move(f); }
 
+    // Replace the steady_clock source used for timer bookkeeping. Tests
+    // inject a synthetic clock so heartbeat math can be driven
+    // deterministically; production leaves this unset and falls back to
+    // Clock::now().
+    using Clock = std::chrono::steady_clock;
+    void set_clock_provider(std::function<Clock::time_point()> f) { clock_ = std::move(f); }
+
+    // Wall-clock tick: the transport calls this periodically (e.g. every
+    // 250ms). The session uses the steady_clock value to decide whether
+    // it needs to emit a Heartbeat (no other outbound for HeartBtInt s),
+    // a TestRequest (no inbound for 1.5*HeartBtInt s), or a Logout
+    // (1.5*HeartBtInt s after a TestRequest with no reply). The return
+    // value is a SessionStep so the call site can write any emitted
+    // bytes and check `disconnect`. `now` is the current steady_clock
+    // time; tests inject a fake clock by calling tick() with their own
+    // values.
+    SessionStep tick(Clock::time_point now);
+
     // Diagnostic accessor: count of outbound messages currently retained
     // in the resend history ring. Test-only.
     std::size_t history_size() const noexcept { return history_.size(); }
@@ -128,7 +146,22 @@ private:
     SeqNum out_seq_{0};
     std::string in_buf_;
     std::function<std::string()> now_;
+    std::function<Clock::time_point()> clock_;
     std::deque<OutboundRecord> history_;
+
+    // Timer state. `last_inbound_` is the wall time of the most recent
+    // byte that successfully parsed; `last_outbound_` is the wall time
+    // of the most recent self-emitted message. `test_request_at_` is
+    // set when a TestRequest was emitted and is cleared when any
+    // inbound message arrives (the inbound itself acts as the response).
+    Clock::time_point last_inbound_{};
+    Clock::time_point last_outbound_{};
+    Clock::time_point test_request_at_{};
+    // Tracks whether the inbound/outbound timestamps are seeded. Until
+    // the first logon completes, tick() is a no-op (we have nothing to
+    // measure silence against).
+    bool timers_armed_{false};
+    bool test_request_outstanding_{false};
 };
 
 }  // namespace obfix::fix

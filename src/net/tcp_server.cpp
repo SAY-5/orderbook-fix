@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -144,9 +145,37 @@ void TcpServer::session_loop(int fd) {
 
     char buf[8192];
     while (running_.load()) {
+        // poll with a 250ms cap so the session can fire timer events
+        // (Heartbeat / TestRequest / heartbeat-timeout Logout) even when
+        // the peer goes completely silent on the wire.
+        pollfd pf{fd, POLLIN, 0};
+        int pr = ::poll(&pf, 1, 250);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) {
+            // Idle tick: run the heartbeat state machine and write any
+            // emitted admin messages.
+            SessionStep tstep = sess.tick(Session::Clock::now());
+            for (const auto& w : tstep.out) {
+                if (!write_all(w.bytes)) {
+                    tstep.disconnect = true;
+                    break;
+                }
+                msgs_out_.fetch_add(1);
+            }
+            if (tstep.disconnect) break;
+            continue;
+        }
         ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
         if (n <= 0) break;
         SessionStep step = sess.on_bytes(std::string_view(buf, static_cast<std::size_t>(n)));
+        // Run tick() after on_bytes so any timer-driven outbound that
+        // would have fired had we polled instead still goes out.
+        SessionStep tstep = sess.tick(Session::Clock::now());
+        for (const auto& w : tstep.out) step.out.push_back(w);
+        if (tstep.disconnect) step.disconnect = true;
         for (const auto& w : step.out) {
             if (!write_all(w.bytes)) {
                 step.disconnect = true;

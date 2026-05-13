@@ -34,6 +34,12 @@ std::string Session::default_now() const {
     return now_ ? now_() : utc_now();
 }
 
+namespace {
+Session::Clock::time_point steady_now_from(const std::function<Session::Clock::time_point()>& fn) {
+    return fn ? fn() : Session::Clock::now();
+}
+}  // namespace
+
 WireOut Session::build_message(const std::vector<std::pair<int, std::string>>& body) {
     // Inject SenderCompID, TargetCompID, MsgSeqNum, SendingTime if not
     // already present. The caller passes MsgType (35) first per FIX 4.4.
@@ -70,6 +76,10 @@ WireOut Session::build_message(const std::vector<std::pair<int, std::string>>& b
         b.push_back(body[i]);
     }
     std::string bytes = serializer_.build(b);
+    // Stamp the outbound timer the moment we hand bytes back to the
+    // caller. Anything that goes out (admin or app) resets the heartbeat
+    // countdown.
+    last_outbound_ = steady_now_from(clock_);
     // Retain in outbound history so a future ResendRequest can replay it.
     // We only retain messages we own the seq for (assigned_seq != 0); the
     // caller is responsible for messages where they preset MsgSeqNum.
@@ -224,7 +234,15 @@ SessionStep Session::handle_message(Message m) {
         if (cfg_.reset_on_logon) {
             in_seq_ = 0;
             out_seq_ = 0;
+            history_.clear();
         }
+        // Logon marks the start of the heartbeat schedule. Both
+        // directions just exchanged a message, so seed both timestamps
+        // here. on_bytes() also bumps last_inbound_ on its own path.
+        last_inbound_ = steady_now_from(clock_);
+        last_outbound_ = steady_now_from(clock_);
+        test_request_outstanding_ = false;
+        timers_armed_ = true;
         // Validate TargetCompID matches our SenderCompID.
         auto target = m.get(tag::TargetCompID);
         auto sender = m.get(tag::SenderCompID);
@@ -316,6 +334,45 @@ SessionStep Session::handle_message(Message m) {
     return step;
 }
 
+SessionStep Session::tick(Clock::time_point now) {
+    SessionStep step;
+    if (state_ != SessionState::LoggedIn) return step;
+    if (cfg_.heartbeat_secs <= 0) return step;
+    if (!timers_armed_) return step;
+    using namespace std::chrono;
+    auto hb = seconds(cfg_.heartbeat_secs);
+    auto half_hb = hb / 2;
+    auto test_window = hb + half_hb;  // 1.5 * HeartBtInt
+
+    // 1) Inbound silence past 1.5*HeartBtInt with no outstanding
+    //    TestRequest -> emit one.
+    if (!test_request_outstanding_ && now - last_inbound_ >= test_window) {
+        auto trid = std::string("tr-") + std::to_string(out_seq_ + 1);
+        step.out.push_back(build_message({
+            {tag::MsgType, msgtype::TestRequest},
+            {tag::TestReqID, trid},
+        }));
+        test_request_at_ = now;
+        test_request_outstanding_ = true;
+        return step;
+    }
+
+    // 2) TestRequest outstanding for more than 1.5*HeartBtInt -> Logout
+    //    and disconnect. The peer has stopped responding entirely.
+    if (test_request_outstanding_ && now - test_request_at_ >= test_window) {
+        step.out.push_back(send_logout("heartbeat timeout"));
+        step.disconnect = true;
+        test_request_outstanding_ = false;
+        return step;
+    }
+
+    // 3) No other outbound for HeartBtInt seconds -> emit a Heartbeat.
+    if (now - last_outbound_ >= hb) {
+        step.out.push_back(send_heartbeat());
+    }
+    return step;
+}
+
 SessionStep Session::on_bytes(std::string_view data) {
     in_buf_.append(data);
     SessionStep total;
@@ -332,6 +389,10 @@ SessionStep Session::on_bytes(std::string_view data) {
             return total;
         }
         in_buf_.erase(0, pr.consumed);
+        // Any successful inbound parse counts as peer liveness and clears
+        // an outstanding TestRequest.
+        last_inbound_ = steady_now_from(clock_);
+        test_request_outstanding_ = false;
         SessionStep s = handle_message(std::move(pr.msg));
         for (auto& w : s.out) total.out.push_back(std::move(w));
         for (auto& a : s.app) total.app.push_back(std::move(a));

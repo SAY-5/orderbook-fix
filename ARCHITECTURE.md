@@ -111,6 +111,41 @@ double-processing of app messages. Adding that is straightforward but
 requires per-message dedup at the matcher layer, which is left as future
 work.
 
+## Heartbeat timer design
+
+The session layer stays pure: it does not own a thread or an OS timer.
+Instead it exposes `Session::tick(Clock::time_point now)`, which the
+transport calls on every recv-loop iteration. The transport's `poll()`
+has a 250ms cap so `tick` runs even when the peer is silent.
+
+Internally the session tracks three timestamps:
+
+* `last_inbound_`: the most recent successful inbound parse.
+* `last_outbound_`: the most recent self-emitted message.
+* `test_request_at_`: when the last self-emitted TestRequest went out.
+
+On each `tick(now)` the session evaluates the three rules in order:
+
+1. **Inbound silence > 1.5 * HeartBtInt** with no outstanding
+   TestRequest -> emit TestRequest (35=1, TestReqID = "tr-<next-seq>").
+   Sets `test_request_outstanding_`.
+2. **TestRequest outstanding > 1.5 * HeartBtInt** -> emit Logout
+   (35=5, Text="heartbeat timeout") and set `step.disconnect = true`.
+   The peer is presumed gone.
+3. **Outbound silence > HeartBtInt** -> emit Heartbeat (35=0).
+
+Any successful inbound parse in `on_bytes` clears
+`test_request_outstanding_` and bumps `last_inbound_`. Any outbound the
+session emits bumps `last_outbound_`. Both timestamps source their
+"now" from `clock_provider_`, an injectable steady-clock function so
+tests can drive synthetic time.
+
+The 250ms poll cap costs roughly 4 wakeups/sec per session when idle,
+which is negligible next to the matcher cost on the same thread. A
+multi-second poll cap was tried and rejected because it made the worst-
+case heartbeat latency = poll_timeout + jitter, which is visible to the
+peer.
+
 ## Concurrency model
 
 * One acceptor thread on the listen socket.
